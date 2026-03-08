@@ -46,3 +46,11 @@ prisma/*.db-journal
 
 # OS
 Thumbs.db
+
+# Personal / Internal Files (Claude & User Ideas)
+.claude/
+.windsurf/
+tokossa-ux-prototype*.html
+AMELIORATIONS-FUTURES.txt
+tokossa-architecture.md
+GUIDE-CONFIGURATION.md

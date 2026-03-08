@@ -14,6 +14,7 @@ const mockPrisma = {
     create: jest.fn(),
   },
   order: {
+    findUnique: jest.fn(),
     update: jest.fn(),
   },
   product: {

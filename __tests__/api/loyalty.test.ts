@@ -25,6 +25,10 @@ jest.mock('@/lib/db', () => ({
 import { GET, POST } from '@/app/api/loyalty/route'
 import { POST as POST_REDEEM } from '@/app/api/loyalty/redeem/route'
 
+// Definir le secret pour les tests (requis par la securite X-Internal-Key)
+const TEST_SECRET = 'test-secret-for-ci'
+process.env.NEXTAUTH_SECRET = TEST_SECRET
+
 // Reinitialiser tous les mocks avant chaque test
 beforeEach(() => {
   jest.clearAllMocks()
@@ -35,6 +39,18 @@ beforeEach(() => {
 // ============================================================
 function createRequest(url: string, options?: RequestInit): Request {
   return new Request(url, options)
+}
+
+// Helper pour creer une Request interne (avec le header de securite)
+function createInternalRequest(url: string, body: Record<string, unknown>): Request {
+  return new Request(url, {
+    method: 'POST',
+    body: JSON.stringify(body),
+    headers: {
+      'Content-Type': 'application/json',
+      'x-internal-key': TEST_SECRET,
+    },
+  })
 }
 
 // ============================================================
@@ -97,12 +113,19 @@ describe('GET /api/loyalty', () => {
 // POST /api/loyalty — Crediter des points apres achat
 // ============================================================
 describe('POST /api/loyalty', () => {
-  it('retourne 400 si les donnees sont manquantes', async () => {
+  it('retourne 401 sans header X-Internal-Key', async () => {
     const request = createRequest('http://localhost/api/loyalty', {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify({ phone: '0197000000', orderTotal: 5000 }),
       headers: { 'Content-Type': 'application/json' },
     })
+
+    const response = await POST(request)
+    expect(response.status).toBe(401)
+  })
+
+  it('retourne 400 si les donnees sont manquantes', async () => {
+    const request = createInternalRequest('http://localhost/api/loyalty', {})
 
     const response = await POST(request)
     const data = await response.json()
@@ -119,15 +142,16 @@ describe('POST /api/loyalty', () => {
     })
     mockPrisma.loyaltyPoint.create.mockResolvedValue({})
     mockPrisma.order.update.mockResolvedValue({})
+    mockPrisma.order.findUnique.mockResolvedValue({
+      status: 'CONFIRMED',
+      total: 5000,
+      phone: '0197000000',
+    })
 
-    const request = createRequest('http://localhost/api/loyalty', {
-      method: 'POST',
-      body: JSON.stringify({
-        phone: '0197000000',
-        orderId: 'order-456',
-        orderTotal: 5000,
-      }),
-      headers: { 'Content-Type': 'application/json' },
+    const request = createInternalRequest('http://localhost/api/loyalty', {
+      phone: '0197000000',
+      orderId: 'order-456',
+      orderTotal: 5000,
     })
 
     const response = await POST(request)
@@ -163,13 +187,9 @@ describe('POST /api/loyalty', () => {
     })
     mockPrisma.loyaltyPoint.create.mockResolvedValue({})
 
-    const request = createRequest('http://localhost/api/loyalty', {
-      method: 'POST',
-      body: JSON.stringify({
-        phone: '0197000000',
-        orderTotal: 100,
-      }),
-      headers: { 'Content-Type': 'application/json' },
+    const request = createInternalRequest('http://localhost/api/loyalty', {
+      phone: '0197000000',
+      orderTotal: 100,
     })
 
     const response = await POST(request)
@@ -179,13 +199,9 @@ describe('POST /api/loyalty', () => {
   })
 
   it('retourne 0 points pour un achat de moins de 100 FCFA', async () => {
-    const request = createRequest('http://localhost/api/loyalty', {
-      method: 'POST',
-      body: JSON.stringify({
-        phone: '0197000000',
-        orderTotal: 50,
-      }),
-      headers: { 'Content-Type': 'application/json' },
+    const request = createInternalRequest('http://localhost/api/loyalty', {
+      phone: '0197000000',
+      orderTotal: 50,
     })
 
     const response = await POST(request)
@@ -205,13 +221,9 @@ describe('POST /api/loyalty', () => {
     })
     mockPrisma.loyaltyPoint.create.mockResolvedValue({})
 
-    const request = createRequest('http://localhost/api/loyalty', {
-      method: 'POST',
-      body: JSON.stringify({
-        phone: '0197000000',
-        orderTotal: 2000,
-      }),
-      headers: { 'Content-Type': 'application/json' },
+    const request = createInternalRequest('http://localhost/api/loyalty', {
+      phone: '0197000000',
+      orderTotal: 2000,
     })
 
     const response = await POST(request)
@@ -307,13 +319,11 @@ describe('POST /api/loyalty/redeem', () => {
     expect(data.error).toContain('300')
   })
 
-  it('utilise 500 points avec succes (1 point = 1 FCFA)', async () => {
+  it('valide 500 points avec succes sans debiter (debit dans /api/commandes)', async () => {
     mockPrisma.user.findUnique.mockResolvedValue({
       id: 'user-123',
       loyaltyPoints: 1200,
     })
-    mockPrisma.user.update.mockResolvedValue({})
-    mockPrisma.loyaltyPoint.create.mockResolvedValue({})
 
     const request = createRequest('http://localhost/api/loyalty/redeem', {
       method: 'POST',
@@ -328,34 +338,19 @@ describe('POST /api/loyalty/redeem', () => {
     const data = await response.json()
 
     expect(response.status).toBe(200)
-    expect(data.discount).toBe(500) // 1 point = 1 FCFA
-    expect(data.pointsUsed).toBe(500)
+    expect(data.discount).toBe(500)
+    expect(data.pointsToUse).toBe(500)
     expect(data.remainingPoints).toBe(700) // 1200 - 500
 
-    // Verifie le debit
-    expect(mockPrisma.user.update).toHaveBeenCalledWith({
-      where: { phone: '0197000000' },
-      data: { loyaltyPoints: { decrement: 500 } },
-    })
-
-    // Verifie l'historique
-    expect(mockPrisma.loyaltyPoint.create).toHaveBeenCalledWith({
-      data: {
-        userId: 'user-123',
-        points: -500,
-        type: 'REDEEM',
-        reason: 'redeem',
-      },
-    })
+    // Redeem ne debite PAS (securite : le debit se fait cote serveur dans /api/commandes)
+    expect(mockPrisma.user.update).not.toHaveBeenCalled()
   })
 
-  it('utilise exactement le minimum de 500 points', async () => {
+  it('valide exactement le minimum de 500 points', async () => {
     mockPrisma.user.findUnique.mockResolvedValue({
       id: 'user-123',
       loyaltyPoints: 500,
     })
-    mockPrisma.user.update.mockResolvedValue({})
-    mockPrisma.loyaltyPoint.create.mockResolvedValue({})
 
     const request = createRequest('http://localhost/api/loyalty/redeem', {
       method: 'POST',
